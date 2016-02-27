@@ -209,7 +209,7 @@ check_results(AppDir, Expected, ProfileRun) ->
     GlobalPluginDirs = filelib:wildcard(filename:join([AppDir, "global", "plugins", "*"])),
     CheckoutsDir = filename:join([AppDir, "_checkouts", "*"]),
     LockFile = filename:join([AppDir, "rebar.lock"]),
-    Locks = lists:flatten(rebar_config:consult_lock_file(LockFile)),
+    {Locks, PluginLocks} = rebar_config:consult_lock_file(LockFile),
 
     InvalidApps = rebar_app_discover:find_apps(BuildDirs, invalid),
     ValidApps = rebar_app_discover:find_apps(BuildDirs, valid),
@@ -327,6 +327,43 @@ check_results(AppDir, Expected, ProfileRun) ->
         ;  ({lock, src, Name, Vsn}) ->
                 ct:pal("Src Lock Name: ~p, Vsn: ~p", [Name, Vsn]),
                 case lists:keyfind(iolist_to_binary(Name), 1, Locks) of
+                    false ->
+                        error({lock_not_found, Name});
+                    {_LockName, {pkg, _, LockVsn}, _} ->
+                        error({pkg_lock, {Name, LockVsn}});
+                    {_LockName, {_, _, {ref, LockVsn}}, _} ->
+                        ?assertEqual(iolist_to_binary(Vsn),
+                                     iolist_to_binary(LockVsn))
+                end
+        ;  ({plugin_lock, Name}) ->
+                ct:pal("Lock Name: ~p", [Name]),
+                ?assertNotEqual(false, lists:keyfind(iolist_to_binary(Name), 1, PluginLocks))
+        ;  ({plugin_lock, Name, Vsn}) ->
+                ct:pal("Lock Name: ~p, Vsn: ~p", [Name, Vsn]),
+                case lists:keyfind(iolist_to_binary(Name), 1, PluginLocks) of
+                    false ->
+                        error({lock_not_found, Name});
+                    {_LockName, {pkg, _, LockVsn}, _} ->
+                        ?assertEqual(iolist_to_binary(Vsn),
+                                     iolist_to_binary(LockVsn));
+                    {_LockName, {_, _, {ref, LockVsn}}, _} ->
+                        ?assertEqual(iolist_to_binary(Vsn),
+                                     iolist_to_binary(LockVsn))
+                end
+        ;  ({plugin_lock, pkg, Name, Vsn}) ->
+                ct:pal("Pkg Lock Name: ~p, Vsn: ~p", [Name, Vsn]),
+                case lists:keyfind(iolist_to_binary(Name), 1, PluginLocks) of
+                    false ->
+                        error({lock_not_found, Name});
+                    {_LockName, {pkg, _, LockVsn}, _} ->
+                        ?assertEqual(iolist_to_binary(Vsn),
+                                     iolist_to_binary(LockVsn));
+                    {_LockName, {_, _, {ref, LockVsn}}, _} ->
+                        error({source_lock, {Name, LockVsn}})
+                end
+        ;  ({plugin_lock, src, Name, Vsn}) ->
+                ct:pal("Src Lock Name: ~p, Vsn: ~p", [Name, Vsn]),
+                case lists:keyfind(iolist_to_binary(Name), 1, PluginLocks) of
                     false ->
                         error({lock_not_found, Name});
                     {_LockName, {pkg, _, LockVsn}, _} ->

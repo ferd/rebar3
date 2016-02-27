@@ -7,7 +7,8 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
-all() -> [current_version, future_versions_no_attrs, future_versions_attrs].
+all() -> [current_version,
+          beta_version, future_versions_no_attrs, future_versions_attrs].
 
 current_version(Config) ->
     %% Current version just dumps the locks as is on disk.
@@ -16,8 +17,26 @@ current_version(Config) ->
              {<<"app2">>, {git,"some_url", {ref,"some_ref"}}, 0},
              {<<"app3">>, {hg,"some_url", {ref,"some_ref"}}, 1},
              {<<"pkg1">>,{pkg,<<"name">>,<<"0.1.6">>},3}],
+    %% Write deplocks-only as beta
     file:write_file(LockFile, io_lib:format("~p.~n", [Locks])),
-    ?assertEqual(Locks, rebar_config:consult_lock_file(LockFile)).
+    ?assertEqual({Locks, []},
+                 rebar_config:consult_lock_file(LockFile)),
+    %% Plugin locks follow the following structure:
+    file:write_file(LockFile,
+                    io_lib:format("~p.~n~p.~n",
+                                  [{"1.0.0", Locks},
+                                   {plugin_locks, Locks}])),
+    ?assertEqual({Locks, Locks}, rebar_config:consult_lock_file(LockFile)).
+
+beta_version(Config) ->
+    %% Current version just dumps the locks as is on disk.
+    LockFile = filename:join(?config(priv_dir, Config), "beta_version"),
+    Locks = [{<<"app1">>, {git,"some_url", {ref,"some_ref"}}, 2},
+             {<<"app2">>, {git,"some_url", {ref,"some_ref"}}, 0},
+             {<<"app3">>, {hg,"some_url", {ref,"some_ref"}}, 1},
+             {<<"pkg1">>,{pkg,<<"name">>,<<"0.1.6">>},3}],
+    file:write_file(LockFile, io_lib:format("~p.~n", [Locks])),
+    ?assertEqual({Locks,[]}, rebar_config:consult_lock_file(LockFile)).
 
 future_versions_no_attrs(Config) ->
     %% Future versions will keep the same core attribute in there, but
@@ -29,8 +48,8 @@ future_versions_no_attrs(Config) ->
              {<<"app3">>, {hg,"some_url", {ref,"some_ref"}}, 1},
              {<<"pkg1">>,{pkg,<<"name">>,<<"0.1.6">>},3}],
     LockData = {"3.5.2", Locks},
-    file:write_file(LockFile, io_lib:format("~p.~n", [LockData])),
-    ?assertEqual(Locks, rebar_config:consult_lock_file(LockFile)).
+    file:write_file(LockFile, io_lib:format("~p.~n[].~n", [LockData])),
+    ?assertEqual({Locks,[]}, rebar_config:consult_lock_file(LockFile)).
 
 future_versions_attrs(Config) ->
     %% Future versions will keep the same core attribute in there, but
@@ -43,4 +62,7 @@ future_versions_attrs(Config) ->
              {<<"pkg1">>,{pkg,<<"name">>,<<"0.1.6">>},3}],
     LockData = {"3.5.2", Locks},
     file:write_file(LockFile, io_lib:format("~p.~na.~n{b,c}.~n[d,e,f].~n", [LockData])),
-    ?assertEqual(Locks, rebar_config:consult_lock_file(LockFile)).
+    ?assertEqual({Locks,[]}, rebar_config:consult_lock_file(LockFile)),
+    file:write_file(LockFile, io_lib:format("~p.~na.~n{b,c}.~n~p.~n[d,e,f].~n",
+                                            [LockData, {plugin_locks, Locks}])),
+    ?assertEqual({Locks,Locks}, rebar_config:consult_lock_file(LockFile)).

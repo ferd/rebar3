@@ -254,8 +254,8 @@ newly_added_dep(Config) ->
                                                                                  ,{"b", "1.0.0", []}])),
     {ok, RebarConfig2} = file:consult(rebar_test_utils:create_config(AppDir, [{deps, TopDeps2}])),
     LockFile = filename:join(AppDir, "rebar.lock"),
-    RebarConfig3 = rebar_config:merge_locks(RebarConfig2,
-                                            rebar_config:consult_lock_file(LockFile)),
+    {Locks, _} = rebar_config:consult_lock_file(LockFile),
+    RebarConfig3 = rebar_config:merge_locks(RebarConfig2, Locks),
 
     %% a should now be installed and c should not change
     rebar_test_utils:run_and_check(
@@ -284,8 +284,8 @@ newly_added_after_empty_lock(Config) ->
     TopDeps2 = rebar_test_utils:top_level_deps(rebar_test_utils:expand_deps(git, [{"a", "1.0.0", []}])),
     {ok, RebarConfig2} = file:consult(rebar_test_utils:create_config(AppDir, [{deps, TopDeps2}])),
     LockFile = filename:join(AppDir, "rebar.lock"),
-    RebarConfig3 = rebar_config:merge_locks(RebarConfig2,
-                                            rebar_config:consult_lock_file(LockFile)),
+    {Locks,[]} = rebar_config:consult_lock_file(LockFile),
+    RebarConfig3 = rebar_config:merge_locks(RebarConfig2, Locks),
 
     %% a should now be installed and c should not change
     rebar_test_utils:run_and_check(

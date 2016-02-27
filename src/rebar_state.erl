@@ -118,9 +118,9 @@ new(ParentState, Config, Deps, Dir) ->
 
 deps_from_config(Dir, Config) ->
     case rebar_config:consult_lock_file(filename:join(Dir, ?LOCK_FILE)) of
-        [] ->
+        {[],_} ->
             [{{deps, default}, proplists:get_value(deps, Config, [])}];
-        D ->
+        {D, _} ->
             %% We want the top level deps only from the lock file.
             %% This ensures deterministic overrides for configs.
             Deps = [X || X <- D, element(3, X) =:= 0],

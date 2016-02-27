@@ -47,8 +47,8 @@ do(State) ->
         {error, Reason} ->
             ?PRV_ERROR({file,Reason});
         {ok, _} ->
-            Locks = rebar_config:consult_lock_file(LockFile),
-            case handle_unlocks(State, Locks, LockFile) of
+            {Locks, PluginLocks} = rebar_config:consult_lock_file(LockFile),
+            case handle_unlocks(State, Locks, PluginLocks, LockFile) of
                 ok ->
                     {ok, State};
                 {error, Reason} ->
@@ -64,16 +64,23 @@ format_error(unknown_lock_format) ->
 format_error(Reason) ->
     io_lib:format("~p", [Reason]).
 
-handle_unlocks(State, Locks, LockFile) ->
+handle_unlocks(State, Locks, PluginLocks, LockFile) ->
     {Args, _} = rebar_state:command_parsed_args(State),
     Names = parse_names(ec_cnv:to_binary(proplists:get_value(package, Args, <<"">>))),
     case [Lock || Lock = {Name, _, _} <- Locks, not lists:member(Name, Names)] of
-        [] ->
+        [] when PluginLocks =:= [] ->
             file:delete(LockFile);
-        _ when Names =:= [] -> % implicitly all locks
+        _ when Names =:= [], PluginLocks =:= [] -> % implicitly all locks
             file:delete(LockFile);
+        [] when PluginLocks =/= [] ->
+            rebar_config:write_lock_file(LockFile, [],
+                                         [{plugin_locks, PluginLocks}]);
+        _ when Names =:= [], PluginLocks =/= [] -> % implicitly all locks, but plugins
+            rebar_config:write_lock_file(LockFile, [],
+                                         [{plugin_locks, PluginLocks}]);
         NewLocks ->
-            rebar_config:write_lock_file(LockFile, NewLocks)
+            rebar_config:write_lock_file(LockFile, NewLocks,
+                                         [{plugin_locks, PluginLocks}])
     end.
 
 parse_names(Bin) ->

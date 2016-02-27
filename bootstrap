@@ -313,7 +313,9 @@ get_deps() ->
             ok = file:delete("rebar.lock"),
             {ok, Config} = file:consult("rebar.config"),
             proplists:get_value(deps, Config);
-        {ok, [Deps]} ->
+        {ok, [Deps]} when is_list(Deps) ->
+            [{binary_to_atom(Name, utf8), "", Source} || {Name, Source, _Level} <- Deps];
+        {ok, [{"1.0.0",Deps}]} ->
             [{binary_to_atom(Name, utf8), "", Source} || {Name, Source, _Level} <- Deps];
         _ ->
             {ok, Config} = file:consult("rebar.config"),

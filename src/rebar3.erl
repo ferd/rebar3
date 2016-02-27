@@ -148,7 +148,9 @@ init_config() ->
                  ConfigFile ->
                      rebar_config:consult_file(ConfigFile)
              end,
-    Config1 = rebar_config:merge_locks(Config, rebar_config:consult_lock_file(?LOCK_FILE)),
+    {Locks, PluginLocks} = rebar_config:consult_lock_file(?LOCK_FILE),
+    Config0 = rebar_config:merge_locks(Config, Locks),
+    Config1 = rebar_config:merge_locks(Config0, PluginLocks),
 
     %% If $HOME/.config/rebar3/rebar.config exists load and use as global config
     GlobalConfigFile = rebar_dir:global_config(),
