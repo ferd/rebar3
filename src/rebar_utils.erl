@@ -455,8 +455,8 @@ reread_config(ConfigList) ->
     reread_config(ConfigList, []).
 
 reread_config(ConfigList, Opts) ->
-    UpdateLoggerConfig = erlang:function_exported(logger, module_info, 0) andalso
-                         proplists:get_value(update_logger, Opts, false),
+    UpdateLoggerConfig = try logger:module_info(), true catch error:undef -> false end
+                         andalso proplists:get_value(update_logger, Opts, false),
     %% NB: we attempt to mimic -config here, which survives app reload,
     %% hence {persistent, true}.
     SetEnv = case version_tuple(?MODULE:otp_release()) of
