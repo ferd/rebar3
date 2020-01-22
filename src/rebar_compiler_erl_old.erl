@@ -1,11 +1,11 @@
--module(rebar_compiler_erl).
+-module(rebar_compiler_erl_old).
 
 -behaviour(rebar_compiler).
 
 -export([context/1,
          needed_files/4,
-         dependencies/3, dependencies/4,
-         compile/4, compile_targets/4,
+         dependencies/3,
+         compile/4,
          clean/2,
          format_error/1]).
 
@@ -86,21 +86,6 @@ dependencies(Source, SourceDir, Dirs) ->
             throw(?PRV_ERROR({cannot_read_file, Source, file:format_error(Reason)}))
     end.
 
-dependencies(Opts, Source, _SourceDir, InclDirs) ->
-    ErlOpts = rebar_opts:erl_opts(Opts),
-    Macros = proplists:get_all_values(d, ErlOpts),
-    Opts = [{includes, InclDirs}, {macros, Macros}],
-    case rebar_compiler_lib:deps(Source, Opts) of
-        {ok, #{missing_include_file := [], missing_include_lib := [],
-               include := AbsIncls, parse_transform := PT, behaviour := B}} ->
-            {AbsIncls, PT ++ B};
-        {ok, #{missing_include_file := L1, missing_include_lib := L2}} ->
-            MissingFile = hd(L1++L2),
-            throw(?PRV_ERROR({cannot_read_file, MissingFile, file:format_error(enoent)}));
-        {error, Reason} ->
-            throw(?PRV_ERROR({cannot_read_file, Source, file:format_error(Reason)}))
-    end.
-
 compile(Source, [{_, OutDir}], Config, ErlOpts) ->
     case compile:file(Source, [{outdir, OutDir} | ErlOpts]) of
         {ok, _Mod} ->
@@ -112,26 +97,6 @@ compile(Source, [{_, OutDir}], Config, ErlOpts) ->
             rebar_compiler:ok_tuple(Source, FormattedWs);
         {error, Es, Ws} ->
             error_tuple(Source, Es, Ws, Config, ErlOpts);
-        error ->
-            error
-    end.
-
-%% TODO: use this to allow mapping a source file to a bunch of artifacts
-%%       with a specific marker.
-%%       - {mark, Res, [Files]} -> uses markers
-%%       - Res -> uses timestamps
-compile_targets(Source, [{_, OutDir}], Config, ErlOpts) ->
-    Target = target_base(OutDir, Source) ++ ".beam",
-    case compile:file(Source, [{outdir, OutDir} | ErlOpts]) of
-        {ok, _Mod} ->
-            {mark, ok, [Target]};
-        {ok, _Mod, []} ->
-            {mark, ok, [Target]};
-        {ok, _Mod, Ws} ->
-            FormattedWs = format_error_sources(Ws, Config),
-            {mark, rebar_compiler:ok_tuple(Source, FormattedWs), [Target]};
-        {error, Es, Ws} ->
-            {mark, error_tuple(Source, Es, Ws, Config, ErlOpts), [Target]};
         error ->
             error
     end.

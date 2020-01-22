@@ -61,7 +61,8 @@ is_deps_only(State) ->
 handle_project_apps(Providers, State) ->
     Cwd = rebar_state:dir(State),
     ProjectApps = rebar_state:project_apps(State),
-    {ok, ProjectApps1} = rebar_digraph:compile_order(ProjectApps),
+    %{ok, ProjectApps1} = rebar_digraph:compile_order(ProjectApps),
+    {ok, ProjectApps1} = compile_order(ProjectApps),
 
     %% Run top level hooks *before* project apps compiled but *after* deps are
     rebar_hooks:run_all_hooks(Cwd, pre, ?PROVIDER, Providers, State),
@@ -96,6 +97,9 @@ format_error({unknown_project_type, Name, Type}) ->
                   "No project builder is configured for type ~s", [Name, Type]);
 format_error(Reason) ->
     io_lib:format("~p", [Reason]).
+
+compile_order(ProjectApps) ->
+    {ok, ProjectApps}.
 
 copy_and_build_apps(State, Providers, Apps) ->
     [build_app(State, Providers, AppInfo) || AppInfo <- Apps].
