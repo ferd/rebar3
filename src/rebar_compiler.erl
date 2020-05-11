@@ -55,7 +55,14 @@ analyze_all({Compiler, G}, Apps) ->
     %% then cover the include files in the digraph to update them
     %% then propagate?
     Contexts = gather_contexts(Compiler, Apps),
-    AppRes = [analyze_app({Compiler, G}, Contexts, AppInfo) || AppInfo <- Apps],
+    %AppRes = [analyze_app({Compiler, G}, Contexts, AppInfo) || AppInfo <- Apps],
+    Parent = self(),
+    AppHandles = [spawn_link(fun() ->
+                    Parent ! {self(), analyze_app({Compiler, G}, Contexts, AppInfo)}
+                  end) || AppInfo <- Apps],
+    AppRes = [receive
+                  {Pid, Res} -> Res
+              end || Pid <- AppHandles],
     {AppOutPaths, AbsSources} = lists:unzip(AppRes),
     SrcExt = maps:get(src_ext, Contexts),
     OutExt = maps:get(artifact_exts, Contexts),
@@ -183,8 +190,9 @@ run(G, CompilerMod, AppInfo, Contexts) ->
     {{FirstFiles, FirstFileOpts},
      {RestFiles, Opts}} = CompilerMod:needed_files(G, FoundFiles, Mappings, AppInfo),
 
-    compile_each(FirstFiles, FirstFileOpts, BaseOpts, Mappings, CompilerMod),
-    Tracked = case RestFiles of
+    Tracked =
+    compile_each(FirstFiles, FirstFileOpts, BaseOpts, Mappings, CompilerMod)
+     ++ case RestFiles of
         {Sequential, Parallel} -> % parallelizable form
             compile_each(Sequential, Opts, BaseOpts, Mappings, CompilerMod) ++
             compile_parallel(Parallel, Opts, BaseOpts, Mappings, CompilerMod);
@@ -246,8 +254,7 @@ store_artifacts(_G, []) ->
     ok;
 store_artifacts(G, [{Source, Target, Meta}|Rest]) ->
     %% Assume the source exists since it was tracked to be compiled
-    digraph:add_vertex(G, Target, {artifact, Meta}),
-    digraph:add_edge(G, Target, Source, artifact),
+    rebar_compiler_dag:store_artifact(G, Source, Target, Meta),
     store_artifacts(G, Rest).
 
 compile_worker(QueuePid, Opts, Config, Outs, CompilerMod) ->

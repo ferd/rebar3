@@ -106,8 +106,8 @@ find_structure() ->
 find_structure(Config) ->
     AppDir = ?config(apps, Config),
     AppNames = ?config(app_names, Config),
-    %% assume an empty graph
-    G = digraph:new([acyclic]),
+    %% assume an empty graph, by submitting bogus data
+    {_Pid, G} = proc_lib:start_link(rebar_compiler_dag, init, [["badfile", []]]),
     analyze_apps(G, AppNames, AppDir),
     FileStamps = [digraph:vertex(G, V) || V <- digraph:vertices(G)],
     Edges = [{V1,V2} || E <- digraph:edges(G),
@@ -147,7 +147,7 @@ app_sort(Config) ->
     AppDir = ?config(apps, Config),
     AppNames = ?config(app_names, Config),
     %% assume an empty graph
-    G = digraph:new([acyclic]),
+    {_Pid, G} = proc_lib:start_link(rebar_compiler_dag, init, [["badfile", []]]),
     analyze_apps(G, AppNames, AppDir),
     AppPaths = [
         {AppName, filename:join([AppDir, "apps", AppName])} || AppName <- AppNames
@@ -164,7 +164,7 @@ propagate_include_app1a(Config) ->
     AppDir = ?config(apps, Config),
     AppNames = ?config(app_names, Config),
     %% assume an empty graph
-    G = digraph:new([acyclic]),
+    {_Pid, G} = proc_lib:start_link(rebar_compiler_dag, init, [["badfile", []]]),
     next_second(),
     F = filename:join([AppDir, "apps", lists:nth(1, AppNames), "src/app1_a.hrl"]),
     bump_file(F),
@@ -191,7 +191,7 @@ propagate_include_app1b(Config) ->
     AppDir = ?config(apps, Config),
     AppNames = ?config(app_names, Config),
     %% assume an empty graph
-    G = digraph:new([acyclic]),
+    {_Pid, G} = proc_lib:start_link(rebar_compiler_dag, init, [["badfile", []]]),
     next_second(),
     F = filename:join([AppDir, "apps", lists:nth(1, AppNames), "include/app1_b.hrl"]),
     bump_file(F),
@@ -218,7 +218,7 @@ propagate_include_app2(Config) ->
     AppDir = ?config(apps, Config),
     AppNames = ?config(app_names, Config),
     %% assume an empty graph
-    G = digraph:new([acyclic]),
+    {_Pid, G} = proc_lib:start_link(rebar_compiler_dag, init, [["badfile", []]]),
     next_second(),
     F = filename:join([AppDir, "apps", lists:nth(2, AppNames), "include/app2.hrl"]),
     bump_file(F),
@@ -245,7 +245,7 @@ propagate_behaviour(Config) ->
     AppDir = ?config(apps, Config),
     AppNames = ?config(app_names, Config),
     %% assume an empty graph
-    G = digraph:new([acyclic]),
+    {_Pid, G} = proc_lib:start_link(rebar_compiler_dag, init, [["badfile", []]]),
     next_second(),
     F = filename:join([AppDir, "apps", lists:nth(2, AppNames), "src/app2.erl"]),
     bump_file(F),
@@ -272,7 +272,7 @@ propagate_app1_ptrans(Config) ->
     AppDir = ?config(apps, Config),
     AppNames = ?config(app_names, Config),
     %% assume an empty graph
-    G = digraph:new([acyclic]),
+    {_Pid, G} = proc_lib:start_link(rebar_compiler_dag, init, [["badfile", []]]),
     next_second(),
     F = filename:join([AppDir, "apps", lists:nth(1, AppNames), "src/app1_trans.erl"]),
     bump_file(F),
@@ -299,7 +299,7 @@ propagate_app2_ptrans(Config) ->
     AppDir = ?config(apps, Config),
     AppNames = ?config(app_names, Config),
     %% assume an empty graph
-    G = digraph:new([acyclic]),
+    {_Pid, G} = proc_lib:start_link(rebar_compiler_dag, init, [["badfile", []]]),
     next_second(),
     F = filename:join([AppDir, "apps", lists:nth(3, AppNames), "src/app3.erl"]),
     bump_file(F),
@@ -327,7 +327,7 @@ propagate_app2_ptrans_hrl(Config) ->
     AppDir = ?config(apps, Config),
     AppNames = ?config(app_names, Config),
     %% assume an empty graph
-    G = digraph:new([acyclic]),
+    {_Pid, G} = proc_lib:start_link(rebar_compiler_dag, init, [["badfile", []]]),
     next_second(),
     F = filename:join([AppDir, "apps", lists:nth(3, AppNames), "src/app3_resolve.hrl"]),
     bump_file(F),
@@ -387,9 +387,7 @@ analyze_apps(G, AppNames, AppDir) ->
     populate_app(G, lists:nth(2, AppNames), AppNames, AppDir, ["app2.erl"]),
     populate_app(G, lists:nth(3, AppNames), AppNames, AppDir, ["app3.erl"]),
     rebar_compiler_dag:populate_deps(G, ".erl", [{".beam", "ebin/"}]),
-    rebar_compiler_dag:propagate_stamps(G),
-    %% manually clear the dirty bit for ease of validation
-    digraph:del_vertex(G, '$r3_dirty_bit').
+    rebar_compiler_dag:propagate_stamps(G).
 
 populate_app(G, Name, AppNames, AppDir, Sources) ->
     InDirs = [filename:join([AppDir, "apps", AppName, "src"])

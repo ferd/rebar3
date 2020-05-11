@@ -3,7 +3,10 @@
 -module(rebar_compiler_dag).
 -export([init/4, maybe_store/5, terminate/1]).
 -export([prune/5, populate_sources/5, populate_deps/3, propagate_stamps/1,
-         compile_order/2]).
+         compile_order/2, store_artifact/4]).
+
+%% internal behaviour exports
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -include("rebar.hrl").
 
@@ -24,17 +27,8 @@
 %% must invalidate the DAG loaded from disk.
 -spec init(file:filename_all(), atom(), string() | undefined, critical_meta()) -> dag().
 init(Dir, Compiler, Label, CritMeta) ->
-    G = digraph:new([acyclic]),
     File = dag_file(Dir, Compiler, Label),
-    try
-        restore_dag(G, File, CritMeta)
-    catch
-        _:_ ->
-            %% Don't mark as dirty yet to avoid creating compiler DAG files for
-            %% compilers that are actually never used.
-            ?WARN("Failed to restore ~ts file. Discarding it.~n", [File]),
-            file:delete(File)
-    end,
+    {_Pid, G} = start_link(File, CritMeta),
     G.
 
 %% @doc Clear up inactive (deleted) source files from a given project.
@@ -105,21 +99,18 @@ populate_sources(G, Compiler, InDirs, [Source|Erls], DepOpts) ->
                 0 ->
                     %% The File doesn't exist anymore, delete
                     %% from the graph.
-                    digraph:del_vertex(G, Source),
-                    mark_dirty(G),
+                    del_vertex(G, Source),
                     populate_sources(G, Compiler, InDirs, Erls, DepOpts);
                 LastModified when LastUpdated < LastModified ->
-                    digraph:add_vertex(G, Source, LastModified),
-                    prepopulate_deps(G, Compiler, InDirs, Source, DepOpts, old),
-                    mark_dirty(G);
+                    add_vertex(G, Source, LastModified),
+                    prepopulate_deps(G, Compiler, InDirs, Source, DepOpts, old);
                 _ -> % unchanged
                     ok
             end;
         false ->
             LastModified = filelib:last_modified(Source),
-            digraph:add_vertex(G, Source, LastModified),
-            prepopulate_deps(G, Compiler, InDirs, Source, DepOpts, new),
-            mark_dirty(G)
+            add_vertex(G, Source, LastModified),
+            prepopulate_deps(G, Compiler, InDirs, Source, DepOpts, new)
     end,
     populate_sources(G, Compiler, InDirs, Erls, DepOpts).
 
@@ -179,18 +170,16 @@ compile_order(G, AppDefs) ->
 
 %% @doc Store the DAG on disk if it was dirty
 maybe_store(G, Dir, Compiler, Label, CritMeta) ->
-    case is_dirty(G) of
-        true ->
-            clear_dirty(G),
-            File = dag_file(Dir, Compiler, Label),
-            store_dag(G, File, CritMeta);
-        false ->
-            ok
-    end.
+    File = dag_file(Dir, Compiler, Label),
+    maybe_store(G, File, CritMeta).
 
 %% Get rid of the live state for the digraph; leave disk stuff in place.
 terminate(G) ->
-    true = digraph:delete(G).
+    stop(G).
+
+store_artifact(G, Source, Target, Meta) ->
+    add_vertex(G, Target, {artifact, Meta}),
+    add_edge(G, Target, Source, artifact).
 
 %%%%%%%%%%%%%%%
 %%% PRIVATE %%%
@@ -206,6 +195,7 @@ dag_file(Dir, CompilerMod, Label) ->
     filename:join([rebar_dir:local_cache_dir(Dir), CompilerMod,
                    ?DAG_ROOT ++ "_" ++ Label ++ ?DAG_EXT]).
 
+%% Called within the server
 restore_dag(G, File, CritMeta) ->
     case file:read_file(File) of
         {ok, Data} ->
@@ -250,18 +240,14 @@ maybe_rm_artifact_and_edge(G, OutDir, SrcExt, Ext, Source) ->
                         file:delete(Target)
                     end, Targets)
             end,
-            digraph:del_vertex(G, Source),
-            mark_dirty(G),
+            del_vertex(G, Source),
             true
     end.
 
 maybe_rm_vertex(G, Source) ->
     case filelib:is_regular(Source) of
-        true ->
-            exists;
-        false ->
-            digraph:del_vertex(G, Source),
-            mark_dirty(G)
+        true -> exists;
+        false -> del_vertex(G, Source)
     end.
 
 %% Add dependencies of a given file to the DAG. If the file is not found yet,
@@ -278,15 +264,15 @@ prepopulate_deps(G, Compiler, InDirs, Source, DepOpts, Status) ->
     end,
     %% the file hasn't been visited yet; set it to existing, but with
     %% a last modified value that's null so it gets updated to something new.
-    [digraph:add_vertex(G, Src, 0) || Src <- AbsIncls,
-                                      digraph:vertex(G, Src) =:= false],
+    [add_new_vertex(G, Src, 0) || Src <- AbsIncls,
+                                  digraph:vertex(G, Src) =:= false],
     %% drop edges from deps that aren't included!
-    [digraph:del_edge(G, Edge) || Status == old,
-                                  Edge <- digraph:out_edges(G, Source),
-                                  {_, _Src, Path, _Label} <- [digraph:edge(G, Edge)],
+    [del_edge(G, Edge) || Status == old,
+                          Edge <- digraph:out_edges(G, Source),
+                          {_, _Src, Path, _Label} <- [digraph:edge(G, Edge)],
                                   not lists:member(Path, AbsIncls)],
     %% Add the rest
-    [digraph:add_edge(G, Source, Incl) || Incl <- AbsIncls],
+    [add_edge(G, Source, Incl) || Incl <- AbsIncls],
     ok.
 
 %% check that a dep file is up to date
@@ -297,11 +283,9 @@ refresh_dep(G, {File, LastUpdated}) ->
     case filelib:last_modified(File) of
         0 ->
             %% Gone! Erase from the graph
-            digraph:del_vertex(G, File),
-            mark_dirty(G);
+            del_vertex(G, File);
         LastModified when LastUpdated < LastModified ->
-            digraph:add_vertex(G, File, LastModified),
-            mark_dirty(G);
+            add_vertex(G, File, LastModified);
         _ ->
             %% unchanged
             ok
@@ -326,7 +310,7 @@ propagate_stamps(G, [File|Files]) ->
                 {_, {artifact, _}} ->
                     ok;
                 {_, Smaller} when Smaller < Max ->
-                    digraph:add_vertex(G, File, Max);
+                    add_vertex(G, File, Max);
                 _ ->
                     ok
             end
@@ -409,23 +393,93 @@ find_app_(Path, [{AppPath, AppName}|Rest]) ->
 target(OutDir, Source, SrcExt, Ext) ->
     filename:join(OutDir, filename:basename(Source, SrcExt) ++ Ext).
 
-%% Mark the digraph as having been modified, which is required to
-%% save its updated form on disk after the compiling run.
-%% This uses a magic vertex to carry the dirty state. This is less
-%% than ideal because listing vertices may expect filenames and
-%% instead there's going to be one trick atom through it.
-mark_dirty(G) ->
-    digraph:add_vertex(G, '$r3_dirty_bit', true),
-    ok.
+%%%%%%%%%%%%%%
+%%% SERVER %%%
+%%%%%%%%%%%%%%
+start_link(File, CritMeta) ->
+    proc_lib:start_link(?MODULE, init, [[File, CritMeta]]).
 
-%% Check whether the digraph has been modified and is considered dirty.
+del_vertex(G, Source) ->
+    gen_server:call({global, G}, {del_vertex, Source}).
+
+del_edge(G, Edge) ->
+    gen_server:call({global, G}, {del_edge, Edge}).
+
+add_vertex(G, Source, Label) ->
+    gen_server:call({global, G}, {add_vertex, Source, Label}).
+
+%% only adds the vertex if it doesn't exist
+add_new_vertex(G, Source, Label) ->
+    gen_server:call({global, G}, {add_new_vertex, Source, Label}).
+
+add_edge(G, V1, V2) ->
+    gen_server:call({global, G}, {add_edge, V1, V2}).
+
+add_edge(G, V1, V2, Label) ->
+    gen_server:call({global, G}, {add_edge, V1, V2, Label}).
+
 is_dirty(G) ->
-    case digraph:vertex(G, '$r3_dirty_bit') of
-        {_, Bool} -> Bool;
-        false -> false
-    end.
+    gen_server:call({global, G}, status) =:= dirty.
 
-%% Remove the dirty status. Because the saving of a digraph on disk saves all
-%% vertices, clear the flag before serializing it.
-clear_dirty(G) ->
-    digraph:del_vertex(G, '$r3_dirty_bit').
+maybe_store(G, File, CritMeta) ->
+    gen_server:call({global, G}, {store, File, CritMeta}).
+
+stop(G) ->
+    gen_server:call({global, G}, stop).
+
+init([File, CritMeta]) ->
+    G = digraph:new([acyclic, protected]),
+    yes = global:register_name(G, self()),
+    Status = try
+        restore_dag(G, File, CritMeta),
+        clean
+    catch
+        _:_ ->
+            %% Don't mark as dirty yet to avoid creating compiler DAG files for
+            %% compilers that are actually never used.
+            ?WARN("Failed to restore ~ts file. Discarding it.~n", [File]),
+            file:delete(File),
+            dirty
+    end,
+    proc_lib:init_ack({self(), G}),
+    gen_server:enter_loop(?MODULE, [], {G, Status}).
+
+handle_call(graph, _From, {G, Status}) ->
+    {reply, G, {G, Status}};
+handle_call({del_vertex, V}, _From, {G, _Status}) ->
+    {reply, digraph:del_vertex(G, V), {G, dirty}};
+handle_call({del_edge, E}, _From, {G, _Status}) ->
+    {reply, digraph:del_edge(G, E), {G, dirty}};
+handle_call({add_vertex, V, L}, _From, {G, _Status}) ->
+    {reply, digraph:add_vertex(G, V, L), {G, dirty}};
+handle_call({add_new_vertex, V, L}, _From, {G, Status}) ->
+    case digraph:vertex(G, V) of
+        false ->
+            {reply, digraph:add_vertex(G, V, L), {G, dirty}};
+        _ ->
+            {reply, ok, {G, Status}}
+    end;
+handle_call({add_edge, V1, V2}, _From, {G, _Status}) ->
+    {reply, digraph:add_edge(G, V1, V2), {G, dirty}};
+handle_call({add_edge, V1, V2, L}, _From, {G, _Status}) ->
+    {reply, digraph:add_edge(G, V1, V2, L), {G, dirty}};
+handle_call(status, _From, {G, Status}) ->
+    {reply, Status, {G, Status}};
+handle_call({store, File, CritMeta}, _From, {G, Status}) ->
+    case Status of
+        clean -> ok;
+        dirty -> store_dag(G, File, CritMeta)
+    end,
+    {reply, ok, {G, clean}};
+handle_call(stop, _From, {G, _}) ->
+    digraph:delete(G),
+    {stop, normal, ok, nostate}.
+
+handle_cast(_Ignore, State) ->
+    {noreply, State}.
+
+handle_info(_Ignore, State) ->
+    {noreply, State}.
+
+terminate(_, _) ->
+    ok.
