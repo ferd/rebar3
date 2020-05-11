@@ -47,7 +47,7 @@
 %% @doc analysis by the caller, in order to let an OTP app
 %% find and resolve all its dependencies as part of compile_all's new
 %% API, which presumes a partial analysis is done ahead of time
--spec analyze_all(DAG, [App, ...]) -> ok when
+-spec analyze_all(DAG, [App, ...]) -> {map(), [[App, ...]]} when
       DAG :: {module(), digraph:graph()},
       App :: rebar_app_info:t().
 analyze_all({Compiler, G}, Apps) ->
@@ -142,7 +142,7 @@ compile_analyzed({Compiler, G}, AppInfo, Contexts) -> % > 3.13.2
     %% Extras are tricky and get their own mini-analysis
     ExtraApps = annotate_extras(AppInfo),
     [begin
-         {ExtraCtx, [SortedExtra]} = analyze_all({Compiler, G}, [ExtraAppInfo]),
+         {ExtraCtx, [[SortedExtra]]} = analyze_all({Compiler, G}, [ExtraAppInfo]),
          run(G, Compiler, SortedExtra, ExtraCtx)
      end || ExtraAppInfo <- ExtraApps],
     ok.
@@ -151,10 +151,18 @@ compile_analyzed({Compiler, G}, AppInfo, Contexts) -> % > 3.13.2
                                 [rebar_app_info:t(), ...], map()) -> ok.
 parallel_compile_analyzed(DAG, Apps, Contexts) -> % > 3.13.2
     %% Run the compile job in parallel
+    Jobs = jobs(Apps),
+    RunMode = case erlang:system_info(schedulers) of
+        Jobs -> sequential;
+        _ -> parallel
+    end,
     parallel_queue(
+        Jobs,
         Apps,
-        fun(AppInfo, [{Compiler,G}, Ctx]) -> run(G, Compiler, AppInfo, Ctx) end,
-        [DAG, Contexts],
+        fun(AppInfo, [{Compiler,G}, Ctx, Mode]) ->
+            run(G, Compiler, AppInfo, Ctx, Mode)
+        end,
+        [DAG, Contexts, RunMode],
         fun(_, _) -> ok end,
         []
     ),
@@ -163,7 +171,7 @@ parallel_compile_analyzed(DAG, Apps, Contexts) -> % > 3.13.2
     parallel_queue(
         ExtraApps,
         fun(ExtraApp, {Compiler, G}) ->
-                {Ctx, [AppInfo]} = analyze_all({Compiler, G}, [ExtraApp]),
+                {Ctx, [[AppInfo]]} = analyze_all({Compiler, G}, [ExtraApp]),
                 run(G, Compiler, AppInfo, Ctx)
         end,
         DAG,
@@ -179,7 +187,7 @@ compile_all(Compilers, AppInfo) -> % =< 3.13.0 interface; plugins use this!
     lists:foreach(fun(Compiler) ->
         OutDir = rebar_app_info:out_dir(AppInfo),
         G = rebar_compiler_dag:init(OutDir, Compiler, undefined, []),
-        Ctx = analyze_all({Compiler, G}, [AppInfo]),
+        {Ctx, _} = analyze_all({Compiler, G}, [AppInfo]),
         compile_analyzed({Compiler, G}, AppInfo, Ctx),
         rebar_compiler_dag:maybe_store(G, OutDir, Compiler, undefined, []),
         rebar_compiler_dag:terminate(G)
@@ -203,6 +211,9 @@ prepare_compiler_env(Compiler, Apps) ->
     ok.
 
 run(G, CompilerMod, AppInfo, Contexts) ->
+    run(G, CompilerMod, AppInfo, Contexts, parallel).
+
+run(G, CompilerMod, AppInfo, Contexts, Mode) ->
     Name = rebar_app_info:name(AppInfo),
     #{src_dirs := SrcDirs,
       src_ext := SrcExt,
@@ -219,11 +230,14 @@ run(G, CompilerMod, AppInfo, Contexts) ->
     Tracked =
     compile_each(FirstFiles, FirstFileOpts, BaseOpts, Mappings, CompilerMod)
      ++ case RestFiles of
-        {Sequential, Parallel} -> % parallelizable form
+        {Sequential, Parallel} when Mode =:= parallel -> % parallelizable form
             compile_each(Sequential, Opts, BaseOpts, Mappings, CompilerMod) ++
             lists:append(
               compile_parallel(Parallel, Opts, BaseOpts, Mappings, CompilerMod)
             );
+        {Sequential, Parallel} -> % parallelizable form, but sequential mode
+            compile_each(Sequential, Opts, BaseOpts, Mappings, CompilerMod) ++
+            compile_each(Parallel, Opts, BaseOpts, Mappings, CompilerMod);
         _ when is_list(RestFiles) -> % traditional sequential build
             compile_each(RestFiles, Opts, BaseOpts, Mappings, CompilerMod)
     end,
@@ -286,12 +300,17 @@ store_artifacts(G, [{Source, Target, Meta}|Rest]) ->
     store_artifacts(G, Rest).
 
 parallel_queue(Tasks, WorkF, WArgs, Handler, HArgs) ->
+    parallel_queue(jobs(Tasks), Tasks, WorkF, WArgs, Handler, HArgs).
+
+parallel_queue(Jobs, Tasks, WorkF, WArgs, Handler, HArgs) ->
     Parent = self(),
     Worker = fun() -> worker(Parent, WorkF, WArgs) end,
-    Jobs = min(length(Tasks), erlang:system_info(schedulers)),
     ?DEBUG("Starting ~B worker(s)", [Jobs]),
     Pids = [spawn_monitor(Worker) || _ <- lists:seq(1, Jobs)],
     parallel_dispatch(Tasks, Pids, Handler, HArgs).
+
+jobs(Tasks) ->
+    min(length(Tasks), erlang:system_info(schedulers)).
 
 parallel_dispatch([], [], _, _) ->
     [];

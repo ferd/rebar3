@@ -418,9 +418,9 @@ find_app_(Path, [{AppPath, AppName}|Rest]) ->
 %% 4. get the in-neighbours of the current app. The in-neighbours
 %%    are apps that depend on the current app.
 %% 5. if none of the dependants (in-neighbours) have been seen before,
-%%    then the app has no dependants (thanks to the topological sort)
-%%    and can be added to the current batch, and we can move to the
-%%    next element (go to 2)
+%%    then the app has no dependants in the current batch (thanks to
+%%    the topological sort) and can be added to the current batch, and
+%%    we can move to the next element (go to 2)
 %% 6. if any of the dependants have been seen already, then the current
 %%    app can't be compiled concurrently with the ongoing batch.
 %%    Add the app to a queue to be re-processed later.
@@ -443,7 +443,7 @@ find_app_(Path, [{AppPath, AppName}|Rest]) ->
 %% Note that the order of batches is important, but the order within each
 %% batch isn't.
 %%
-%% Also note that i we instead use the reverse topological sort and
+%% Also note that if we instead use the reverse topological sort and
 %% the out-neighbours to check, we get:
 %%
 %%    [[D E H I J] [B C G] [A F]]
