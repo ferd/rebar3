@@ -56,13 +56,12 @@ analyze_all({Compiler, G}, Apps) ->
     %% then propagate?
     Contexts = gather_contexts(Compiler, Apps),
     %AppRes = [analyze_app({Compiler, G}, Contexts, AppInfo) || AppInfo <- Apps],
-    Parent = self(),
-    AppHandles = [spawn_link(fun() ->
-                    Parent ! {self(), analyze_app({Compiler, G}, Contexts, AppInfo)}
-                  end) || AppInfo <- Apps],
-    AppRes = [receive
-                  {Pid, Res} -> Res
-              end || Pid <- AppHandles],
+    AppRes = parallel_queue(
+        Apps,
+        fun(AppInfo, [DAG, Ctx]) -> analyze_app(DAG, Ctx, AppInfo) end,
+        [{Compiler, G}, Contexts],
+        fun(X, _) -> {ok, X} end, []
+    ),
     {AppOutPaths, AbsSources} = lists:unzip(AppRes),
     SrcExt = maps:get(src_ext, Contexts),
     OutExt = maps:get(artifact_exts, Contexts),
@@ -195,7 +194,9 @@ run(G, CompilerMod, AppInfo, Contexts) ->
      ++ case RestFiles of
         {Sequential, Parallel} -> % parallelizable form
             compile_each(Sequential, Opts, BaseOpts, Mappings, CompilerMod) ++
-            compile_parallel(Parallel, Opts, BaseOpts, Mappings, CompilerMod);
+            lists:append(
+              compile_parallel(Parallel, Opts, BaseOpts, Mappings, CompilerMod)
+            );
         _ when is_list(RestFiles) -> % traditional sequential build
             compile_each(RestFiles, Opts, BaseOpts, Mappings, CompilerMod)
     end,
@@ -257,75 +258,89 @@ store_artifacts(G, [{Source, Target, Meta}|Rest]) ->
     rebar_compiler_dag:store_artifact(G, Source, Target, Meta),
     store_artifacts(G, Rest).
 
-compile_worker(QueuePid, Opts, Config, Outs, CompilerMod) ->
-    QueuePid ! self(),
+parallel_queue(Tasks, WorkF, WArgs, Handler, HArgs) ->
+    Parent = self(),
+    Worker = fun() -> worker(Parent, WorkF, WArgs) end,
+    Jobs = min(length(Tasks), erlang:system_info(schedulers)),
+    ?DEBUG("Starting ~B worker(s)", [Jobs]),
+    Pids = [spawn_monitor(Worker) || _ <- lists:seq(1, Jobs)],
+    parallel_dispatch(Tasks, Pids, Handler, HArgs).
+
+parallel_dispatch([], [], _, _) ->
+    [];
+parallel_dispatch(Targets, Pids, Handler, Args) ->
     receive
-        {compile, Source} ->
-            Result =
-            case erlang:function_exported(CompilerMod, compile_and_track, 4) of
-                false ->
-                    CompilerMod:compile(Source, Outs, Config, Opts);
-                true ->
-                    CompilerMod:compile_and_track(Source, Outs, Config, Opts)
-            end,
-            QueuePid ! {Result, Source},
-            compile_worker(QueuePid, Opts, Config, Outs, CompilerMod);
+        {ready, Worker} when is_pid(Worker), Targets =:= [] ->
+            Worker ! empty,
+            parallel_dispatch(Targets, Pids, Handler, Args);
+        {ready, Worker} when is_pid(Worker) ->
+            [Task|Tasks] = Targets,
+            Worker ! {task, Task},
+            parallel_dispatch(Tasks, Pids, Handler, Args);
+        {'DOWN', Mref, _, Pid, normal} ->
+            NewPids = lists:delete({Pid, Mref}, Pids),
+            parallel_dispatch(Targets, NewPids, Handler, Args);
+        {'DOWN', _Mref, _, _Pid, Info} ->
+            ?ERROR("Task failed: ~p", [Info]),
+            ?FAIL;
+        {result, Result} ->
+            case Handler(Result, Args) of
+                ok ->
+                    parallel_dispatch(Targets, Pids, Handler, Args);
+                {ok, Acc} ->
+                    [Acc | parallel_dispatch(Targets, Pids, Handler, Args)]
+            end
+    end.
+
+worker(QueuePid, F, Args) ->
+    QueuePid ! {ready, self()},
+    receive
+        {task, Task} ->
+            QueuePid ! {result, F(Task, Args)},
+            worker(QueuePid, F, Args);
         empty ->
             ok
     end.
 
-compile_parallel([], _Opts, _BaseOpts, _Mappings, _CompilerMod) ->
-    [];
-compile_parallel(Targets, Opts, BaseOpts, Mappings, CompilerMod) ->
-    Self = self(),
-    F = fun() -> compile_worker(Self, Opts, BaseOpts, Mappings, CompilerMod) end,
-    Jobs = min(length(Targets), erlang:system_info(schedulers)),
-    ?DEBUG("Starting ~B compile worker(s)", [Jobs]),
-    Pids = [spawn_monitor(F) || _I <- lists:seq(1, Jobs)],
-    compile_queue(Targets, Pids, Opts, BaseOpts, Mappings, CompilerMod).
+compile_worker(Source, [Opts, Config, Outs, CompilerMod]) ->
+    Result = case erlang:function_exported(CompilerMod, compile_and_track, 4) of
+        false ->
+            CompilerMod:compile(Source, Outs, Config, Opts);
+        true ->
+            CompilerMod:compile_and_track(Source, Outs, Config, Opts)
+    end,
+    %% Bundle the source to allow proper reporting in the handler:
+    {Result, Source}.
 
-compile_queue([], [], _Opts, _Config, _Outs, _CompilerMod) ->
-    [];
-compile_queue(Targets, Pids, Opts, Config, Outs, CompilerMod) ->
+compile_handler({ok, Source}, _Args) ->
+    ?DEBUG("~sCompiled ~s", [rebar_utils:indent(1), Source]),
+    ok;
+compile_handler({{ok, Tracked}, Source}, [_, Tracking]) when Tracking ->
+    ?DEBUG("~sCompiled ~s", [rebar_utils:indent(1), Source]),
+    {ok, Tracked};
+compile_handler({{ok, Warnings}, Source}, _Args) ->
+    report(Warnings),
+    ?DEBUG("~sCompiled ~s", [rebar_utils:indent(1), Source]),
+    ok;
+compile_handler({{ok, Tracked, Warnings}, Source}, [_, Tracking]) when Tracking ->
+    report(Warnings),
+    ?DEBUG("~sCompiled ~s", [rebar_utils:indent(1), Source]),
+    {ok, Tracked};
+compile_handler({skipped, Source}, _Args) ->
+    ?DEBUG("~sSkipped ~s", [rebar_utils:indent(1), Source]),
+    ok;
+compile_handler({Error, Source}, [Config | _Rest]) ->
+    NewSource = format_error_source(Source, Config),
+    ?ERROR("Compiling ~ts failed", [NewSource]),
+    maybe_report(Error),
+    ?FAIL.
+
+
+compile_parallel(Targets, Opts, BaseOpts, Mappings, CompilerMod) ->
     Tracking = erlang:function_exported(CompilerMod, compile_and_track, 4),
-    receive
-        Worker when is_pid(Worker), Targets =:= [] ->
-            Worker ! empty,
-            compile_queue(Targets, Pids, Opts, Config, Outs, CompilerMod);
-        Worker when is_pid(Worker) ->
-            Worker ! {compile, hd(Targets)},
-            compile_queue(tl(Targets), Pids, Opts, Config, Outs, CompilerMod);
-        {ok, Source} ->
-            ?DEBUG("~sCompiled ~s", [rebar_utils:indent(1), Source]),
-            compile_queue(Targets, Pids, Opts, Config, Outs, CompilerMod);
-        {{ok, Tracked}, Source} when Tracking ->
-            ?DEBUG("~sCompiled ~s", [rebar_utils:indent(1), Source]),
-            Tracked ++
-              compile_queue(Targets, Pids, Opts, Config, Outs, CompilerMod);
-        {{ok, Warnings}, Source} when not Tracking ->
-            report(Warnings),
-            ?DEBUG("~sCompiled ~s", [rebar_utils:indent(1), Source]),
-            compile_queue(Targets, Pids, Opts, Config, Outs, CompilerMod);
-        {{ok, Tracked, Warnings}, Source} when Tracking ->
-            report(Warnings),
-            ?DEBUG("~sCompiled ~s", [rebar_utils:indent(1), Source]),
-            Tracked ++
-              compile_queue(Targets, Pids, Opts, Config, Outs, CompilerMod);
-        {skipped, Source} ->
-            ?DEBUG("~sSkipped ~s", [rebar_utils:indent(1), Source]),
-            compile_queue(Targets, Pids, Opts, Config, Outs, CompilerMod);
-        {Error, Source} ->
-            NewSource = format_error_source(Source, Config),
-            ?ERROR("Compiling ~ts failed", [NewSource]),
-            maybe_report(Error),
-            ?FAIL;
-        {'DOWN', Mref, _, Pid, normal} ->
-            Pids2 = lists:delete({Pid, Mref}, Pids),
-            compile_queue(Targets, Pids2, Opts, Config, Outs, CompilerMod);
-        {'DOWN', _Mref, _, _Pid, Info} ->
-            ?ERROR("Compilation failed: ~p", [Info]),
-            ?FAIL
-    end.
+    parallel_queue(Targets,
+                   fun compile_worker/2, [Opts, BaseOpts, Mappings, CompilerMod],
+                   fun compile_handler/2, [BaseOpts, Tracking]).
 
 %% @doc remove compiled artifacts from an AppDir.
 -spec clean([module()], rebar_app_info:t()) -> 'ok'.
