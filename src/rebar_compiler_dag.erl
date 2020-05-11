@@ -8,6 +8,10 @@
 %% internal behaviour exports
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-ifdef(TEST).
+-export([parallel_order/1]).
+-endif.
+
 -include("rebar.hrl").
 
 -define(DAG_VSN, 3).
@@ -160,8 +164,11 @@ propagate_stamps(G) ->
 %% @doc Return the reverse sorting order to get dep-free apps first.
 %% -- we would usually not need to consider the non-source files for the order to
 %% be complete, but using them doesn't hurt.
-compile_order(_, AppDefs) when length(AppDefs) =< 1 ->
-    [Name || {Name, _Path} <- AppDefs];
+-spec compile_order(digraph:graph(), [{binary(), string()}]) -> [[binary(),...]].
+compile_order(_, []) ->
+    [];
+compile_order(_, [{Name, _}]) ->
+    [[Name]];
 compile_order(G, AppDefs) ->
     Edges = [{V1,V2} || E <- digraph:edges(G),
                         {_,V1,V2,_} <- [digraph:edge(G, E)]],
@@ -325,14 +332,11 @@ compile_order([], AppPaths, AppDeps) ->
     %% use a digraph so we don't reimplement topsort by hand.
     G = digraph:new([acyclic]), % ignore cycles and hope it works
     Tups = maps:keys(AppDeps),
-    {Va,Vb} = lists:unzip(Tups),
-    [digraph:add_vertex(G, V) || V <- Va],
-    [digraph:add_vertex(G, V) || V <- Vb],
+    [digraph:add_vertex(G, Name) || {_, Name} <- AppPaths],
     [digraph:add_edge(G, V1, V2) || {V1, V2} <- Tups],
-    Sorted = lists:reverse(digraph_utils:topsort(G)),
+    Batches = parallel_order(G),
     digraph:delete(G),
-    Standalone = [Name || {_, Name} <- AppPaths] -- Sorted,
-    Standalone ++ Sorted;
+    Batches;
 compile_order([{P1,P2}|T], AppPaths, AppDeps) ->
     %% Assume most dependencies are between files of the same app
     %% so ask to see if it's the same before doing a deeper check:
@@ -385,6 +389,85 @@ find_app_(Path, [{AppPath, AppName}|Rest]) ->
             find_app_(Path, Rest)
     end.
 
+%% @private
+%% This function aims to create batches of OTP applications that can
+%% be operated on in parallel. A given app can be in a batch if none of the
+%% other apps in the batch require the given app to be compiled already
+%% in order to build.
+%%
+%% Let's use the following app dep tree as a sample.
+%%
+%%      A     F     J
+%%     / \    |
+%%    B   C   G
+%%    |  / \ / \
+%%    D E   H   I
+%%
+%% By using a topological sort on the digraph, we can get a list of all
+%% apps in the order:
+%%
+%%    A B C D E F G H I J
+%%
+%% Where each node in the list has all its dependencies after it.
+%%
+%% This lets us build the following algorithm:
+%%
+%% 1. Do a topological sort of the graph
+%% 2. Scan the topological sort, element by element. For each element:
+%% 3. Mark the element (app) as seen in a set (implemented as a map)
+%% 4. get the in-neighbours of the current app. The in-neighbours
+%%    are apps that depend on the current app.
+%% 5. if none of the dependants (in-neighbours) have been seen before,
+%%    then the app has no dependants (thanks to the topological sort)
+%%    and can be added to the current batch, and we can move to the
+%%    next element (go to 2)
+%% 6. if any of the dependants have been seen already, then the current
+%%    app can't be compiled concurrently with the ongoing batch.
+%%    Add the app to a queue to be re-processed later.
+%% 7. when the topological sort list is exhausted, we consider the batch
+%%    done. We then reset the seen elements' set and start reprocessing
+%%    the queue, which is still in topological order (go to 2)
+%%
+%% As such, with the tree and topological sort above, we should get the
+%% following results:
+%%
+%%                                Batch         Queue
+%%    A B C D E F G H I J  -->   [A F J]   [B C D E G H I]
+%%    B C D E G H I        -->   [B C G]   [D E H I]
+%%    D E H I              -->   [D E H I] []
+%%
+%% Resulting in the following batches:
+%%
+%%    [[D E H I] [B C G] [A F J]]
+%%
+%% Note that the order of batches is important, but the order within each
+%% batch isn't.
+%%
+%% Also note that i we instead use the reverse topological sort and
+%% the out-neighbours to check, we get:
+%%
+%%    [[D E H I J] [B C G] [A F]]
+%%
+%% Both groups are equivalent, but since using the former approach skips
+%% two list reversals (reversing the topsort and reversing the accumulator),
+%% we go with the former approach.
+-spec parallel_order(digraph:graph()) -> [[_, ...]].
+parallel_order(G) ->
+    parallel_order(G, digraph_utils:topsort(G), #{}, [], [], []).
+
+parallel_order(_, [], _Seen, [], Batch, Acc) ->
+    [Batch | Acc];
+parallel_order(G, [], _Seen, Queue, Batch, Acc) ->
+    parallel_order(G, lists:reverse(Queue), #{}, [], [], [Batch | Acc]);
+parallel_order(G, [V|Vs], Seen, Queue, Batch, Acc) ->
+    NewSeen = Seen#{V => true},
+    Deps = digraph:in_neighbours(G, V),
+    case lists:any(fun(Dep) -> maps:is_key(Dep, Seen) end, Deps) of
+        false ->
+            parallel_order(G, Vs, NewSeen, Queue, [V|Batch], Acc);
+        true ->
+            parallel_order(G, Vs, NewSeen, [V|Queue], Batch, Acc)
+    end.
 
 
 %% @private Return what should be the base name of an erl file, relocated to the

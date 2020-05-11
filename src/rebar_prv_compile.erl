@@ -304,17 +304,21 @@ build_rebar3_apps(DAGs, Apps, State) ->
     %% we actually need to compile each DAG one after the other to prevent
     %% issues where a .yrl file that generates a .erl file gets to be seen.
     [begin
-         {Ctx, ReorderedApps} = rebar_compiler:analyze_all(DAG, Apps),
+         {Ctx, BatchedApps} = rebar_compiler:analyze_all(DAG, Apps),
          lists:foreach(
-             fun(AppInfo) ->
+             fun(Batch) ->
                 DAG =:= LastDAG andalso
-                  ?INFO("Compiling ~ts", [rebar_app_info:name(AppInfo)]),
-                rebar_compiler:compile_analyzed(DAG, AppInfo, Ctx)
+                  ?INFO("Compiling ~ts", [app_names(Batch)]),
+                rebar_compiler:parallel_compile_analyzed(DAG, Batch, Ctx)
              end,
-             ReorderedApps
+             BatchedApps
          )
      end || DAG <- DAGs],
     ok.
+
+app_names([]) -> "";
+app_names([App]) -> rebar_app_info:name(App);
+app_names([App|Apps]) -> [rebar_app_info:name(App), ", " | app_names(Apps)].
 
 update_code_paths(State, ProjectApps) ->
     ProjAppsPaths = paths_for_apps(ProjectApps),

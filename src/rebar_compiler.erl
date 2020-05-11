@@ -2,6 +2,7 @@
 
 -export([analyze_all/2,
          compile_analyzed/3,
+         parallel_compile_analyzed/3,
          compile_all/2,
          clean/2,
 
@@ -55,7 +56,6 @@ analyze_all({Compiler, G}, Apps) ->
     %% then cover the include files in the digraph to update them
     %% then propagate?
     Contexts = gather_contexts(Compiler, Apps),
-    %AppRes = [analyze_app({Compiler, G}, Contexts, AppInfo) || AppInfo <- Apps],
     AppRes = parallel_queue(
         Apps,
         fun(AppInfo, [DAG, Ctx]) -> analyze_app(DAG, Ctx, AppInfo) end,
@@ -129,13 +129,15 @@ analyze_app({Compiler, G}, Contexts, AppInfo) ->
     ),
     {{BaseDir, ArtifactDir}, AbsSources}.
 
-sort_apps(Names, Apps) ->
+sort_apps(Batches, Apps) ->
     NamedApps = [{rebar_app_info:name(App), App} || App <- Apps],
-    [App || Name <- Names,
-            {_, App} <- [lists:keyfind(Name, 1, NamedApps)]].
+    lists:map(fun(Names) ->
+                [App || Name <- Names,
+                        {_, App} <- [lists:keyfind(Name, 1, NamedApps)]]
+              end, Batches).
 
 -spec compile_analyzed({module(), digraph:graph()}, rebar_app_info:t(), map()) -> ok.
-compile_analyzed({Compiler, G}, AppInfo, Contexts) -> % > 3.13.0
+compile_analyzed({Compiler, G}, AppInfo, Contexts) -> % > 3.13.2
     run(G, Compiler, AppInfo, Contexts),
     %% Extras are tricky and get their own mini-analysis
     ExtraApps = annotate_extras(AppInfo),
@@ -143,6 +145,31 @@ compile_analyzed({Compiler, G}, AppInfo, Contexts) -> % > 3.13.0
          {ExtraCtx, [SortedExtra]} = analyze_all({Compiler, G}, [ExtraAppInfo]),
          run(G, Compiler, SortedExtra, ExtraCtx)
      end || ExtraAppInfo <- ExtraApps],
+    ok.
+
+-spec parallel_compile_analyzed({module(), digraph:graph()},
+                                [rebar_app_info:t(), ...], map()) -> ok.
+parallel_compile_analyzed(DAG, Apps, Contexts) -> % > 3.13.2
+    %% Run the compile job in parallel
+    parallel_queue(
+        Apps,
+        fun(AppInfo, [{Compiler,G}, Ctx]) -> run(G, Compiler, AppInfo, Ctx) end,
+        [DAG, Contexts],
+        fun(_, _) -> ok end,
+        []
+    ),
+    %% Do the analysis and of all extras and run them in parallel too.
+    ExtraApps = lists:append([annotate_extras(AppInfo) || AppInfo <- Apps]),
+    parallel_queue(
+        ExtraApps,
+        fun(ExtraApp, {Compiler, G}) ->
+                {Ctx, [AppInfo]} = analyze_all({Compiler, G}, [ExtraApp]),
+                run(G, Compiler, AppInfo, Ctx)
+        end,
+        DAG,
+        fun(_, _) -> ok end,
+        []
+    ),
     ok.
 
 -spec compile_all([module(), ...], rebar_app_info:t()) -> ok.

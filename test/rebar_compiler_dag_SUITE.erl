@@ -6,7 +6,7 @@
 -include_lib("kernel/include/file.hrl").
 
 all() ->
-    [{group, with_project}].
+    [{group, with_project}, parallel_order].
 
 groups() ->
     %% The tests in this group are dirty, the order is specific
@@ -152,9 +152,9 @@ app_sort(Config) ->
     AppPaths = [
         {AppName, filename:join([AppDir, "apps", AppName])} || AppName <- AppNames
     ],
-    ?assertEqual([lists:nth(2, AppNames),
-                  lists:nth(3, AppNames),
-                  lists:nth(1, AppNames)],
+    ?assertEqual([[lists:nth(2, AppNames)],
+                  [lists:nth(3, AppNames)],
+                  [lists:nth(1, AppNames)]],
                  rebar_compiler_dag:compile_order(G, AppPaths)),
     ok.
 
@@ -348,6 +348,18 @@ propagate_app2_ptrans_hrl(Config) ->
     ],
     matches(Matches, FileStamps),
     ok.
+
+parallel_order(_Config) ->
+     V = [a,b,c,d,e,f,g,h,i,j],
+     E = [{a,b}, {a,c}, {b, d}, {c, e}, {c, h}, {f,g}, {g, h}, {g,i}],
+     G = digraph:new(),
+     [digraph:add_vertex(G,N) || N <- V],
+     [digraph:add_edge(G, M, N) || {M,N} <- lists:reverse(E)],
+     ?assertEqual(
+        [[d,e,h,i],[b,c,g],[a,f,j]],
+        [lists:sort(X) || X <- rebar_compiler_dag:parallel_order(G)]
+     ),
+     ok.
 
 %%%%%%%%%%%%%%%
 %%% HELPERS %%%
