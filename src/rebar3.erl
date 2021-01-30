@@ -97,6 +97,10 @@ run(BaseState, Commands) ->
 run(RawArgs) ->
     start_and_load_apps(command_line),
 
+    %% Initialize logging system
+    Verbosity = log_level(),
+    ok = rebar_log:init(command_line, Verbosity),
+
     BaseState = init_config(),
     BaseState1 = rebar_state:set(BaseState, caller, command_line),
 
@@ -198,10 +202,6 @@ run_aux(State, RawArgs) ->
 -spec init_config() -> rebar_state:t().
 init_config() ->
     rebar_utils:set_httpc_options(),
-
-    %% Initialize logging system
-    Verbosity = log_level(),
-    ok = rebar_log:init(command_line, Verbosity),
 
     Config = rebar_config:consult_root(),
     Config1 = rebar_config:merge_locks(Config, rebar_config:consult_lock_file(?LOCK_FILE)),
